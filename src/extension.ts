@@ -222,13 +222,30 @@ async function convertSelection() {
     return;
   }
 
-  if (!japaneseDetector.isJapanese(selectedText)) {
-    vscode.window.showErrorMessage('選択テキストに日本語が含まれていません');
+  const trimmedText = selectedText.trim();
+
+  if (!japaneseDetector.isJapanese(trimmedText)) {
+    const line = editor.document.lineAt(selection.start.line).text;
+    const escapedName = trimmedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const isFunction = new RegExp(
+      `(?:function\\s+${escapedName}\\s*\\(|(?:const|let|var)\\s+${escapedName}\\s*=\\s*(?:async\\s*)?\\()`
+    ).test(line);
+    const issue = grammarValidator.validate(trimmedText, isFunction);
+
+    if (!issue) {
+      vscode.window.showInformationMessage('選択された識別子に修正が必要な文法上の問題はありません');
+      return;
+    }
+
+    await editor.edit((editBuilder) => {
+      editBuilder.replace(selection, issue.suggestion);
+    });
+    vscode.window.showInformationMessage(`✅ 命名を修正しました: "${issue.suggestion}"`);
     return;
   }
 
   try {
-    const englishName = await copilotConverter.convert(selectedText.trim());
+    const englishName = await copilotConverter.convert(trimmedText);
     if (englishName) {
       editor.edit((editBuilder) => {
         editBuilder.replace(selection, englishName);

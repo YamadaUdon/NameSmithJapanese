@@ -2,7 +2,7 @@
   "name": "smith-japanese",
   "displayName": "Smith Japanese",
   "description": "Japanese to English code identifier converter using GitHub Copilot AI",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "YamadaUdon",
   "license": "MIT",
   "repository": {
