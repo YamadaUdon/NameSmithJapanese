@@ -1,9 +1,8 @@
 import * as vscode from 'vscode';
 import { JapaneseDetector } from './detector/japaneseDetector';
-import { CopilotConverter, TokenUsage } from './converter/copilotConverter';
-import { NamingGrammarValidator, NamingIssue } from './validator/namingGrammarValidator';
+import { CopilotConverter } from './converter/copilotConverter';
+import { NamingGrammarValidator } from './validator/namingGrammarValidator';
 
-let extensionContext: vscode.ExtensionContext;
 let copilotConverter: CopilotConverter;
 let grammarValidator: NamingGrammarValidator;
 let japaneseDetector: JapaneseDetector;
@@ -17,7 +16,6 @@ let issuesFound = 0;
 let totalCostUSD = 0;
 
 export async function activate(context: vscode.ExtensionContext) {
-  extensionContext = context;
   console.log('NameSmith extension activated');
 
   // Initialize converters and validators
@@ -82,12 +80,39 @@ function validateDocument(document: vscode.TextDocument): void {
     return;
   }
 
+  const config = vscode.workspace.getConfiguration('namesmith');
+  if (!config.get<boolean>('enabled', true) || !config.get<boolean>('autoDetect', true)) {
+    diagnosticCollection.delete(document.uri);
+    return;
+  }
+
   const diagnostics: vscode.Diagnostic[] = [];
   const text = document.getText();
   const lines = text.split('\n');
 
+  for (const identifier of japaneseDetector.detectIdentifiers(text)) {
+    const line = document.lineAt(identifier.line);
+    const startChar = line.text.indexOf(identifier.name);
+    if (startChar === -1) {
+      continue;
+    }
+
+    const range = new vscode.Range(
+      new vscode.Position(identifier.line, startChar),
+      new vscode.Position(identifier.line, startChar + identifier.name.length)
+    );
+    const diagnostic = new vscode.Diagnostic(
+      range,
+      `日本語の識別子です。英語への変換を検討してください: "${identifier.name}"`,
+      vscode.DiagnosticSeverity.Information
+    );
+    diagnostic.code = 'namesmith.japanese-identifier';
+    diagnostic.source = 'NameSmith';
+    diagnostics.push(diagnostic);
+  }
+
   // Regex to find identifiers
-  const identifierRegex = /(?:const|let|var|function|async\s+function|class|interface)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/g;
+  const identifierRegex = /(?:const|let|var|function|async\s+function|class|interface)\s+([a-zA-Z_$\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF][a-zA-Z0-9_$\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]*)/g;
 
   for (let lineNum = 0; lineNum < lines.length; lineNum++) {
     const line = lines[lineNum];
