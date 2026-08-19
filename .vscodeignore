@@ -1,0 +1,15 @@
+.gitignore
+.gitattributes
+*.map
+.eslintrc.json
+package-lock.json
+SETUP.md
+src/**
+tsconfig.json
+**/*.test.ts
+out/**
+!out/extension.js
+out/test
+node_modules
+.vscode-test/
+*.vsix

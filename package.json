@@ -1,0 +1,112 @@
+{
+  "name": "namesmithjapanese",
+  "displayName": "NameSmith Japanese",
+  "description": "Japanese to English code identifier converter using GitHub Copilot AI",
+  "version": "0.1.0",
+  "publisher": "YamadaUdon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YamadaUdon/NameSmithJapanese.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YamadaUdon/NameSmithJapanese/issues"
+  },
+  "homepage": "https://github.com/YamadaUdon/NameSmithJapanese#readme",
+  "keywords": [
+    "japanese",
+    "copilot",
+    "naming",
+    "identifier",
+    "refactor"
+  ],
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:python",
+    "onLanguage:java",
+    "onLanguage:cpp",
+    "onLanguage:csharp"
+  ],
+  "extensionDependencies": [
+    "GitHub.copilot-chat"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "namesmith.convertFile",
+        "title": "NameSmith: Convert file identifiers to English"
+      },
+      {
+        "command": "namesmith.convertSelection",
+        "title": "NameSmith: Convert selected identifier to English"
+      },
+      {
+        "command": "namesmith.showSettings",
+        "title": "NameSmith: Settings"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "namesmith.convertSelection",
+        "key": "ctrl+shift+alt+j",
+        "mac": "cmd+shift+alt+j"
+      }
+    ],
+    "configuration": {
+      "title": "NameSmith",
+      "properties": {
+        "namesmith.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable NameSmith real-time detection"
+        },
+        "namesmith.autoDetect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-detect Japanese identifiers and show suggestions"
+        },
+        "namesmith.targetIdentifiers": {
+          "type": "string",
+          "enum": [
+            "functions_and_variables",
+            "functions_only",
+            "variables_only"
+          ],
+          "default": "functions_and_variables",
+          "description": "What to convert: functions and variables, functions only, or variables only"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run esbuild-base -- --minify",
+    "esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "esbuild": "npm run esbuild-base -- --sourcemap",
+    "esbuild-watch": "npm run esbuild-base -- --sourcemap --watch",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.84.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "esbuild": "^0.19.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
