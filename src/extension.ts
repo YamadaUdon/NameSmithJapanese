@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { JapaneseDetector } from './detector/japaneseDetector';
 import { CopilotConverter } from './converter/copilotConverter';
 import { NamingGrammarValidator } from './validator/namingGrammarValidator';
+import { JapaneseHoverProvider } from './providers/hoverProvider';
 
 let copilotConverter: CopilotConverter;
 let grammarValidator: NamingGrammarValidator;
@@ -23,6 +24,7 @@ export async function activate(context: vscode.ExtensionContext) {
   grammarValidator = new NamingGrammarValidator();
   japaneseDetector = new JapaneseDetector();
   diagnosticCollection = vscode.languages.createDiagnosticCollection('namesmith');
+  currentModel = vscode.workspace.getConfiguration('namesmith').get<string>('model', '') || 'auto';
 
   // Create status bar
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -48,7 +50,17 @@ export async function activate(context: vscode.ExtensionContext) {
       currentModel = 'gpt-4';
       updateStatusBar();
       vscode.window.showInformationMessage('NameSmith: 統計情報をリセットしました');
-    })
+    }),
+    vscode.commands.registerCommand('namesmith.applyHoverConversion', applyHoverConversion),
+    vscode.commands.registerCommand('namesmith.selectModel', selectModel)
+  );
+
+  // Register hover provider
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(
+      ['javascript', 'typescript'],
+      new JapaneseHoverProvider(copilotConverter)
+    )
   );
 
   context.subscriptions.push(statusBarItem);
@@ -178,43 +190,74 @@ async function convertFile() {
   const japaneseIdentifiers = japaneseDetector.detectIdentifiers(document.getText());
 
   if (japaneseIdentifiers.length === 0) {
-    vscode.window.showInformationMessage('日本語の識別子が見つかりません');
+    // 日本語がない場合は英語の命名文法チェックを実行
+    validateDocument(document);
+    const grammarIssues = (diagnosticCollection.get(document.uri) ?? [])
+      .filter(d => d.source === 'NameSmith Grammar');
+    if (grammarIssues.length === 0) {
+      vscode.window.showInformationMessage('日本語の識別子・命名の問題は見つかりません');
+    } else {
+      const answer = await vscode.window.showInformationMessage(
+        `日本語の識別子はありませんが、英語の命名に${grammarIssues.length}件の問題があります。修正しますか？`,
+        '修正する'
+      );
+      if (answer === '修正する') {
+        await fixAllIssues();
+      }
+    }
     return;
   }
 
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: 'NameSmith: 識別子を変換中...',
+      title: 'NameSmith: 変換候補を生成中...',
       cancellable: true,
     },
     async (progress, token) => {
       try {
-        const edits: vscode.TextEdit[] = [];
-
+        // まず全識別子の候補を生成
+        const candidatesMap = new Map<string, string[]>();
         for (let i = 0; i < japaneseIdentifiers.length; i++) {
-          if (token.isCancellationRequested) break;
+          if (token.isCancellationRequested) return;
 
           const identifier = japaneseIdentifiers[i];
           progress.report({
             increment: (100 / japaneseIdentifiers.length),
-            message: `変換中: ${identifier.name}`,
+            message: `候補生成中: ${identifier.name}`,
           });
 
-          const englishName = await copilotConverter.convert(identifier.name);
-          if (englishName && englishName !== identifier.name) {
-            const fullText = document.getText();
-            let index = 0;
-            while ((index = fullText.indexOf(identifier.name, index)) !== -1) {
-              const position = document.positionAt(index);
-              const range = new vscode.Range(
-                position,
-                position.translate(0, identifier.name.length)
-              );
-              edits.push(vscode.TextEdit.replace(range, englishName));
-              index += identifier.name.length;
-            }
+          const candidates = await copilotConverter.convertWithCandidates(identifier.name, identifier.type);
+          if (candidates.length > 0) {
+            candidatesMap.set(identifier.name, candidates);
           }
+        }
+
+        // 識別子ごとに候補を選択
+        const edits: vscode.TextEdit[] = [];
+        for (const identifier of japaneseIdentifiers) {
+          const candidates = candidatesMap.get(identifier.name);
+          if (!candidates) continue;
+
+          const englishName = await pickCandidate(identifier.name, identifier.type, candidates);
+          if (!englishName || englishName === identifier.name) continue;
+
+          const fullText = document.getText();
+          let index = fullText.indexOf(identifier.name);
+          while (index !== -1) {
+            const position = document.positionAt(index);
+            const range = new vscode.Range(
+              position,
+              position.translate(0, identifier.name.length)
+            );
+            edits.push(vscode.TextEdit.replace(range, englishName));
+            index = fullText.indexOf(identifier.name, index + identifier.name.length);
+          }
+        }
+
+        if (edits.length === 0) {
+          vscode.window.showInformationMessage('変換は行われませんでした');
+          return;
         }
 
         const workspaceEdit = new vscode.WorkspaceEdit();
@@ -222,7 +265,7 @@ async function convertFile() {
         await vscode.workspace.applyEdit(workspaceEdit);
 
         vscode.window.showInformationMessage(
-          `✅ ${edits.length}個の識別子を英語に変換しました`
+          `✅ ${edits.length}ヶ所を英語に変換しました`
         );
       } catch (error) {
         vscode.window.showErrorMessage(`変換エラー: ${error}`);
@@ -230,6 +273,109 @@ async function convertFile() {
       }
     }
   );
+}
+
+/**
+ * 変換候補をQuickPickで表示し、選択された候補を返す（スキップ時はundefined）
+ */
+async function pickCandidate(
+  originalName: string,
+  kind: 'function' | 'variable',
+  candidates: string[]
+): Promise<string | undefined> {
+  const kindLabel = kind === 'function' ? '関数' : '変数';
+  const items: vscode.QuickPickItem[] = candidates.map((c, i) => ({
+    label: c,
+    description: i === 0 ? '推奨' : undefined,
+  }));
+  items.push({ label: '$(close) スキップ', description: 'この識別子は変換しない', alwaysShow: true });
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `NameSmith: 変換候補の選択`,
+    placeHolder: `${kindLabel} "${originalName}" の変換先を選択してください`,
+  });
+
+  if (!picked || picked.label.includes('スキップ')) {
+    return undefined;
+  }
+  return picked.label;
+}
+
+/**
+ * ホバーのリンクから呼ばれ、ドキュメント内の識別子を一括置換する
+ */
+async function applyHoverConversion(original: string, replacement: string): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !original || !replacement) {
+    return;
+  }
+
+  const document = editor.document;
+  const fullText = document.getText();
+  const edits: vscode.TextEdit[] = [];
+  let index = fullText.indexOf(original);
+  while (index !== -1) {
+    const position = document.positionAt(index);
+    edits.push(vscode.TextEdit.replace(
+      new vscode.Range(position, position.translate(0, original.length)),
+      replacement
+    ));
+    index = fullText.indexOf(original, index + original.length);
+  }
+
+  if (edits.length === 0) {
+    return;
+  }
+
+  const workspaceEdit = new vscode.WorkspaceEdit();
+  workspaceEdit.set(document.uri, edits);
+  await vscode.workspace.applyEdit(workspaceEdit);
+  vscode.window.showInformationMessage(`✅ "${original}" を "${replacement}" に変換しました（${edits.length}ヶ所）`);
+}
+
+/**
+ * 利用可能なCopilotモデルをQuickPickで選択して設定に保存する
+ */
+async function selectModel(): Promise<void> {
+  const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+  if (!models || models.length === 0) {
+    vscode.window.showWarningMessage('利用可能なCopilotモデルが見つかりません。GitHub Copilotにサインインしているか確認してください。');
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration('namesmith');
+  const current = config.get<string>('model', '');
+
+  const items: (vscode.QuickPickItem & { value: string })[] = [
+    {
+      label: '$(sparkle) 自動（既定）',
+      description: current === '' ? '現在の設定' : undefined,
+      detail: '利用可能な最初のモデルを使用',
+      value: '',
+    },
+    ...models.map(m => ({
+      label: m.name,
+      description: [m.family, current === m.family ? '現在の設定' : undefined].filter(Boolean).join(' — '),
+      detail: `vendor: ${m.vendor} / id: ${m.id} / max input tokens: ${m.maxInputTokens}`,
+      value: m.family,
+    })),
+  ];
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: 'NameSmith: AIモデルの選択',
+    placeHolder: '変換に使用するモデルを選択してください',
+  });
+  if (!picked || picked.value === current) {
+    return;
+  }
+
+  await config.update('model', picked.value, vscode.ConfigurationTarget.Global);
+
+  // モデルが変わったので既存の変換結果は破棄
+  copilotConverter.clearCache();
+  currentModel = picked.value === '' ? models[0].family : picked.value;
+  updateStatusBar();
+  vscode.window.showInformationMessage(`NameSmith: モデルを「${picked.label.replace('$(sparkle) ', '')}」に変更しました`);
 }
 
 async function convertSelection() {
@@ -270,9 +416,21 @@ async function convertSelection() {
   }
 
   try {
-    const englishName = await copilotConverter.convert(trimmedText);
+    const line = editor.document.lineAt(selection.start.line).text;
+    const escapedName = trimmedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const isFunction = new RegExp(
+      `(?:function\\s+${escapedName}\\s*\\(|(?:const|let|var)\\s+${escapedName}\\s*=\\s*(?:async\\s*)?\\()`
+    ).test(line);
+    const kind = isFunction ? 'function' as const : 'variable' as const;
+    const candidates = await copilotConverter.convertWithCandidates(trimmedText, kind);
+    if (candidates.length === 0) {
+      vscode.window.showWarningMessage('変換候補を生成できませんでした');
+      return;
+    }
+
+    const englishName = await pickCandidate(trimmedText, kind, candidates);
     if (englishName) {
-      editor.edit((editBuilder) => {
+      await editor.edit((editBuilder) => {
         editBuilder.replace(selection, englishName);
       });
       vscode.window.showInformationMessage(`✅ 変換完了: "${englishName}"`);

@@ -14,6 +14,7 @@ export interface CopilotResponse {
 
 export class CopilotConverter {
   private cache: Map<string, string> = new Map();
+  private candidatesCache: Map<string, string[]> = new Map();
   private statusBarItem: vscode.StatusBarItem;
 
   // Token pricing (as of 2024)
@@ -32,21 +33,23 @@ export class CopilotConverter {
     this.updateStatusBar();
   }
 
-  async convert(japaneseIdentifier: string): Promise<string> {
+  async convert(japaneseIdentifier: string, kind: 'function' | 'variable' = 'variable'): Promise<string> {
     // Check cache first
-    if (this.cache.has(japaneseIdentifier)) {
+    const cacheKey = `${kind}:${japaneseIdentifier}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached !== undefined) {
       this.statusBarItem.text = '$(check) NameSmith: Cache hit';
       this.statusBarItem.show();
-      return this.cache.get(japaneseIdentifier)!;
+      return cached;
     }
 
     try {
       // Use GitHub Copilot Chat API to convert
-      const prompt = this.buildPrompt(japaneseIdentifier);
+      const prompt = this.buildPrompt(japaneseIdentifier, kind);
       const result = await this.callCopilotAPI(prompt);
 
       if (result.text) {
-        this.cache.set(japaneseIdentifier, result.text);
+        this.cache.set(cacheKey, result.text);
 
         // Update status bar with token usage
         if (result.usage) {
@@ -65,29 +68,100 @@ export class CopilotConverter {
       // Fallback to basic transliteration
       return this.fallbackConversion(japaneseIdentifier);
     }
-
-    return japaneseIdentifier;
   }
 
-  private buildPrompt(japaneseIdentifier: string): string {
-    return `Convert the following Japanese identifier to a proper English programming identifier using verb+noun format (e.g., "getUserData", "calculateTotal", "fetchProducts"). Return ONLY the English identifier, nothing else.
+  /**
+   * 変換候補を複数（最大3件）返す。失敗時はフォールバック変換1件を返す。
+   */
+  async convertWithCandidates(japaneseIdentifier: string, kind: 'function' | 'variable' = 'variable'): Promise<string[]> {
+    const cacheKey = `${kind}:${japaneseIdentifier}`;
+    const cached = this.candidatesCache.get(cacheKey);
+    if (cached !== undefined) {
+      this.statusBarItem.text = '$(check) NameSmith: Cache hit';
+      this.statusBarItem.show();
+      return cached;
+    }
 
-Japanese identifier: ${japaneseIdentifier}
+    try {
+      const prompt = this.buildCandidatesPrompt(japaneseIdentifier, kind);
+      const result = await this.callCopilotAPIRaw(prompt);
+
+      if (result.text) {
+        const candidates = [...new Set(
+          result.text
+            .split('\n')
+            .map(line => this.validateAndCleanEnglishIdentifier(line))
+            .filter(c => c.length > 0)
+        )].slice(0, 3);
+
+        if (candidates.length > 0) {
+          this.candidatesCache.set(cacheKey, candidates);
+          this.cache.set(cacheKey, candidates[0]);
+          if (result.usage) {
+            this.displayTokenUsage(japaneseIdentifier, result.usage);
+          }
+          return candidates;
+        }
+      }
+
+      return [this.fallbackConversion(japaneseIdentifier)];
+    } catch (error) {
+      console.error('Copilot conversion error:', error);
+      this.statusBarItem.text = '$(error) NameSmith: Error';
+      this.statusBarItem.show();
+      return [this.fallbackConversion(japaneseIdentifier)];
+    }
+  }
+
+  private buildCandidatesPrompt(japaneseIdentifier: string, kind: 'function' | 'variable'): string {
+    if (kind === 'function') {
+      return `Convert the following Japanese function name to English camelCase identifiers in verb+noun order (e.g., "getUserData", "calculateTotal"). Return exactly 3 candidates, one per line, best first. Return ONLY the identifiers, nothing else.
+
+Japanese function name: ${japaneseIdentifier}
+
+Candidates:`;
+    }
+
+    return `Convert the following Japanese variable name to English camelCase identifiers as noun phrases WITHOUT a leading verb (e.g., "userName", "totalPrice"). Return exactly 3 candidates, one per line, best first. Return ONLY the identifiers, nothing else.
+
+Japanese variable name: ${japaneseIdentifier}
+
+Candidates:`;
+  }
+
+  private buildPrompt(japaneseIdentifier: string, kind: 'function' | 'variable'): string {
+    if (kind === 'function') {
+      return `Convert the following Japanese function name to an English camelCase identifier in verb+noun order (e.g., "getUserData", "calculateTotal", "fetchProducts"). Return ONLY the identifier, nothing else.
+
+Japanese function name: ${japaneseIdentifier}
+
+English identifier:`;
+    }
+
+    return `Convert the following Japanese variable name to an English camelCase identifier as a noun phrase WITHOUT a leading verb (e.g., "userName", "totalPrice", "productList"). Return ONLY the identifier, nothing else.
+
+Japanese variable name: ${japaneseIdentifier}
 
 English identifier:`;
   }
 
   private async callCopilotAPI(prompt: string): Promise<CopilotResponse> {
-    try {
-      // Use the Language Models API available in VS Code 1.93.0+
-      const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    const raw = await this.callCopilotAPIRaw(prompt);
+    return {
+      text: this.validateAndCleanEnglishIdentifier(raw.text),
+      usage: raw.usage
+    };
+  }
 
-      if (!models || models.length === 0) {
+  private async callCopilotAPIRaw(prompt: string): Promise<CopilotResponse> {
+    try {
+      const model = await this.selectModel();
+
+      if (!model) {
         console.warn('No Copilot models found. Using fallback conversion.');
         return { text: '' };
       }
 
-      const model = models[0];
       const messages = [
         new vscode.LanguageModelChatMessage(
           vscode.LanguageModelChatMessageRole.User,
@@ -107,13 +181,34 @@ English identifier:`;
       const usage = this.estimateTokenUsage(prompt, text);
 
       return {
-        text: this.validateAndCleanEnglishIdentifier(text),
+        text,
         usage: usage
       };
     } catch (error) {
       console.error('Copilot API call failed:', error);
       return { text: '' };
     }
+  }
+
+  /**
+   * 設定 namesmith.model（family または id）に一致するモデルを優先し、なければ先頭を使う
+   */
+  private async selectModel(): Promise<vscode.LanguageModelChat | undefined> {
+    const preferred = vscode.workspace.getConfiguration('namesmith').get<string>('model', '');
+    const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    if (!models || models.length === 0) {
+      return undefined;
+    }
+
+    if (preferred) {
+      const matched = models.find(m => m.family === preferred || m.id === preferred);
+      if (matched) {
+        return matched;
+      }
+      console.warn(`NameSmith: model "${preferred}" not found. Falling back to ${models[0].family}.`);
+    }
+
+    return models[0];
   }
 
   private estimateTokenUsage(prompt: string, response: string): TokenUsage {
@@ -155,11 +250,19 @@ English identifier:`;
   }
 
   private validateAndCleanEnglishIdentifier(text: string): string {
-    // Remove any extra characters, keep only valid identifier characters
-    let cleaned = text
-      .split('\n')[0] // Take first line only
+    // Take first non-empty line, strip list markers/labels/quotes/backticks
+    let cleaned = (text.split('\n').find(l => l.trim().length > 0) ?? '')
       .trim()
-      .replace(/[^a-zA-Z0-9_$]/g, ''); // Remove invalid characters
+      .replace(/^(?:\d+[.)]|[-*•])\s*/, '')
+      .replace(/^(?:english identifier|candidates?)\s*:\s*/i, '')
+      .replace(/^[`"'\s]+|[`"'\s.:;]+$/g, '');
+
+    // Join space/hyphen/underscore separated words into camelCase, preserving inner caps
+    const parts = cleaned.split(/[\s\-_]+/).filter(p => p.length > 0);
+    cleaned = parts
+      .map((p, i) => (i === 0 ? p : p.charAt(0).toUpperCase() + p.slice(1)))
+      .join('')
+      .replace(/[^a-zA-Z0-9_$]/g, ''); // Remove remaining invalid characters
 
     // Ensure it doesn't start with a number
     if (/^\d/.test(cleaned)) {
@@ -167,22 +270,16 @@ English identifier:`;
     }
 
     // Ensure it doesn't start with $
-    if (cleaned.startsWith('$')) {
+    while (cleaned.startsWith('$')) {
       cleaned = cleaned.substring(1);
     }
 
-    // Return camelCase format
-    return this.toCamelCase(cleaned);
-  }
-
-  private toCamelCase(str: string): string {
-    if (!str) {
-      return str;
+    // Lowercase first character (camelCase)
+    if (cleaned) {
+      cleaned = cleaned.charAt(0).toLowerCase() + cleaned.slice(1);
     }
 
-    return str
-      .replace(/[-_](.)/g, (_, char) => char.toUpperCase()) // Convert snake_case to camelCase
-      .replace(/^(.)/, (_, char) => char.toLowerCase()); // Lowercase first character
+    return cleaned;
   }
 
   private fallbackConversion(japaneseIdentifier: string): string {
@@ -210,6 +307,7 @@ English identifier:`;
 
   clearCache(): void {
     this.cache.clear();
+    this.candidatesCache.clear();
   }
 
   getStatusBarItem(): vscode.StatusBarItem {

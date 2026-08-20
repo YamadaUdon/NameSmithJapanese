@@ -1,5 +1,3 @@
-import * as vscode from 'vscode';
-
 export interface NamingIssue {
   name: string;
   rule: string;
@@ -39,38 +37,6 @@ export class NamingGrammarValidator {
   ];
 
   private booleanPrefixes = ['is', 'has', 'can', 'should', 'must', 'will', 'do'];
-
-  /**
-   * Rule 1: 基本的な語順チェック（修飾語 → 対象）
-   */
-  private checkBasicWordOrder(name: string, isFunction: boolean): NamingIssue | null {
-    const words = this.extractWords(name);
-    if (words.length < 2) return null;
-
-    // Skip if it starts with a verb (for functions)
-    if (isFunction && this.isVerb(words[0])) return null;
-
-    // Check if first word is noun and second is also a noun with likely wrong order
-    const firstIsNoun = this.isNoun(words[0]);
-    const secondIsNoun = this.isNoun(words[1]);
-
-    if (firstIsNoun && secondIsNoun) {
-      // Check if it looks like reversed order
-      // e.g., "nameUser" should be "userName"
-      const reversed = this.reverseWordOrder(words);
-      if (reversed !== name) {
-        return {
-          name: name,
-          rule: 'Rule 1: 基本的な語順',
-          severity: 'error',
-          suggestion: reversed,
-          explanation: `命名は「修飾語 → 対象」の順序にしてください。例: "${reversed}" (${words.slice(1).join('')}の${words[0]}, ではなく ${words[0]}の${words.slice(1).join('')})`
-        };
-      }
-    }
-
-    return null;
-  }
 
   /**
    * Rule 2: 名詞の組み合わせ（大きな分類 → 具体的内容）
@@ -115,7 +81,7 @@ export class NamingGrammarValidator {
     // Check if attribute word comes first (wrong order)
     if (attributeWords.includes(words[0])) {
       // Likely reversed order
-      const corrected = [...words.slice(1), words[0]].join('');
+      const corrected = [...words.slice(1), words[0]].join(' ');
       return {
         name: name,
         rule: 'Rule 3: 属性・状態の順序',
@@ -132,7 +98,6 @@ export class NamingGrammarValidator {
    * Rule 4: Boolean値（状態・条件 → 対象）
    */
   private checkBooleanNaming(name: string): NamingIssue | null {
-    const lowerName = name.toLowerCase();
     const words = this.extractWords(name);
 
     // Check if it's a Boolean but doesn't have prefix
@@ -140,7 +105,8 @@ export class NamingGrammarValidator {
       // Check if it looks like a boolean value (contains yes/no, active/inactive, etc)
       const booleanIndicators = ['active', 'deleted', 'valid', 'visible', 'enabled', 'checked', 'selected', 'locked', 'pending', 'available'];
 
-      if (booleanIndicators.some(indicator => lowerName.includes(indicator))) {
+      // 単語単位で一致した場合のみ（validateUser の "valid" 部分一致などを除外）
+      if (words.some(w => booleanIndicators.includes(w))) {
         const suggested = 'is' + name.charAt(0).toUpperCase() + name.slice(1);
         return {
           name: name,
@@ -153,7 +119,7 @@ export class NamingGrammarValidator {
     }
 
     // Check for negative form (Rule 7)
-    if (lowerName.startsWith('isNot') || lowerName.startsWith('isNo') || lowerName.includes('Not')) {
+    if (/isNot[A-Z]/.test(name) || /^not[A-Z]/.test(name) || /hasNo[A-Z]/.test(name)) {
       const corrected = this.convertNegativeToPosisitive(name);
       if (corrected !== name) {
         return {
@@ -179,7 +145,7 @@ export class NamingGrammarValidator {
     // 一般的な命名規則として、語順が不自然な「名詞 + 動詞」のみを検出する
     // 例: userGet -> getUser
     if (this.isNoun(words[0]) && this.isVerb(words[1])) {
-      const corrected = [words[1], words[0], ...words.slice(2)].join('');
+      const corrected = [words[1], words[0], ...words.slice(2)].join(' ');
       return {
         name: name,
         rule: 'Rule 5: 関数名の基本ルール',
@@ -197,28 +163,22 @@ export class NamingGrammarValidator {
    */
   private checkConditionalFormat(name: string): NamingIssue | null {
     const words = this.extractWords(name);
-    if (words.length < 3) return null;
+    if (words.length < 4) return null;
 
-    // Check for patterns like "findByIdUser" (wrong) vs "findUserById" (correct)
-    const byKeywordIndex = words.findIndex(w => w.toLowerCase() === 'by');
-    if (byKeywordIndex > 0 && byKeywordIndex < words.length - 1) {
-      // Check if there's a noun after "by" that should come before
-      const nounBeforeBy = words.slice(0, byKeywordIndex).find(w => this.isNoun(w));
-      const nounAfterBy = words.slice(byKeywordIndex + 1).find(w => this.isNoun(w));
-
-      if (nounBeforeBy && nounAfterBy && byKeywordIndex > 1) {
-        // Wrong order detected
-        const verb = words[0];
-        const mainNoun = nounAfterBy;
-        const condition = words.slice(byKeywordIndex).join('');
-        const corrected = `${verb}${mainNoun}${condition}`;
-
+    // 「動詞 + by + 条件 + 対象」の誤った語順を検出（例: findByIdUser → findUserById）
+    // 正しい語順 (findUserById) は by が動詞の直後に来ないため検出されない
+    if (this.isVerb(words[0]) && words[1] === 'by') {
+      const mainNoun = words[words.length - 1];
+      if (this.isNoun(mainNoun)) {
+        const corrected = this.toCamelCase(
+          [words[0], mainNoun, ...words.slice(1, -1)].join(' ')
+        );
         return {
           name: name,
           rule: 'Rule 6: 条件付き検索',
           severity: 'warning',
-          suggestion: this.toCamelCase(corrected),
-          explanation: `検索条件を含む場合は「動詞 → 対象 → 条件」の順にしてください。例: ${this.toCamelCase(corrected)}`
+          suggestion: corrected,
+          explanation: `検索条件を含む場合は「動詞 → 対象 → 条件」の順にしてください。例: ${corrected}`
         };
       }
     }
@@ -229,10 +189,9 @@ export class NamingGrammarValidator {
   /**
    * Validate any identifier name
    */
-  validate(name: string, isFunction: boolean = false): NamingIssue | null {
+  validate(name: string, isFunction: boolean = false, depth: number = 0): NamingIssue | null {
     // Run all validation rules
     const checks = [
-      this.checkBasicWordOrder(name, isFunction),
       this.checkNounCombination(name),
       this.checkAttributeOrder(name),
       this.checkBooleanNaming(name),
@@ -246,15 +205,19 @@ export class NamingGrammarValidator {
 
     // Return first issue found (prioritize by severity)
     const errors = checks.filter(c => c && c.severity === 'error');
-    if (errors.length > 0) return errors[0]!;
-
     const warnings = checks.filter(c => c && c.severity === 'warning');
-    if (warnings.length > 0) return warnings[0]!;
-
     const infos = checks.filter(c => c && c.severity === 'info');
-    if (infos.length > 0) return infos[0]!;
+    const issue = errors[0] ?? warnings[0] ?? infos[0] ?? null;
 
-    return null;
+    if (!issue || issue.suggestion === name) return null;
+
+    // 修正案を再検証して元の名前に戻る場合（ループ）は報告しない
+    if (depth === 0) {
+      const next = this.validate(issue.suggestion, isFunction, 1);
+      if (next && next.suggestion === name) return null;
+    }
+
+    return issue;
   }
 
   // ============== Helper Methods ==============
@@ -283,11 +246,6 @@ export class NamingGrammarValidator {
     return words;
   }
 
-  private reverseWordOrder(words: string[]): string {
-    if (words.length < 2) return words.join('');
-    return this.toCamelCase([...words.slice(1), words[0]].join(''));
-  }
-
   private matchesWordPattern(words: string[], pattern: string[]): boolean {
     if (words.length !== pattern.length) return false;
     return words.every((w, i) => w === pattern[i].toLowerCase());
@@ -307,13 +265,7 @@ export class NamingGrammarValidator {
     corrected = corrected.replace(/hasNo([A-Z])/g, (_, char) => 'lacks' + char);
     corrected = corrected.replace(/has[Nn]o/g, 'lacks');
 
-    return this.toCamelCase(corrected);
-  }
-
-  private suggestVerbForFunction(name: string): string {
-    // Try to find a good verb for this identifier
-    const commonPrefixes = ['get', 'fetch', 'load', 'create', 'make', 'build'];
-    return commonPrefixes[0] + name.charAt(0).toUpperCase() + name.slice(1);
+    return corrected;
   }
 
   private toCamelCase(str: string): string {

@@ -54,6 +54,10 @@
       {
         "command": "namesmith.showSettings",
         "title": "NameSmith: Settings"
+      },
+      {
+        "command": "namesmith.selectModel",
+        "title": "NameSmith: Select AI Model"
       }
     ],
     "keybindings": [
@@ -85,6 +89,11 @@
           ],
           "default": "functions_and_variables",
           "description": "What to convert: functions and variables, functions only, or variables only"
+        },
+        "namesmith.model": {
+          "type": "string",
+          "default": "",
+          "description": "AI model family or ID to use for conversion (e.g. \"gpt-4o\", \"gpt-4o-mini\"). Empty = auto (first available Copilot model). Use \"NameSmith: Select AI Model\" command to pick from available models."
         }
       }
     }
